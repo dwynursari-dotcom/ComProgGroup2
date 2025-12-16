@@ -1,0 +1,729 @@
+import pygame
+import random
+import math
+import os
+import struct # Diperlukan untuk membuat data suara
+
+# --- KONFIGURASI AWAL ---
+pygame.init()
+pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512) # Audio settings
+
+# Ukuran Layar
+SCREEN_WIDTH = 1000
+SCREEN_HEIGHT = 700
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("Jet Fighter Pro: Galactic Defense")
+
+# Warna (R, G, B)
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+RED = (255, 50, 50)
+GREEN = (50, 255, 50)
+BLUE = (50, 100, 255)
+YELLOW = (255, 255, 0)
+ORANGE = (255, 165, 0)
+PURPLE = (180, 50, 230)
+CYAN = (0, 255, 255)
+GREY = (100, 100, 100)
+DARK_GREY = (50, 50, 50)
+SPACE_BLUE = (25, 25, 50)
+STAR_COLORS = [(255, 255, 200), (200, 220, 255), (255, 200, 200), (200, 255, 200)]
+
+# Font
+try:
+    font_title = pygame.font.Font("fonts/arial.ttf", 72)
+    font_menu = pygame.font.Font("fonts/arial.ttf", 40)
+except:
+    font_title = pygame.font.Font(None, 72)
+    font_menu = pygame.font.Font(None, 40)
+    
+try:
+    font_text = pygame.font.Font("fonts/arial.ttf", 32)
+except:
+    font_text = pygame.font.Font(None, 32)
+
+# Kecepatan Game
+clock = pygame.time.Clock()
+FPS = 60
+
+# --- PENGATURAN GLOBAL (SETTINGS) ---
+# Nilai default (0-10 untuk volume)
+settings = {
+    "music_vol": 5,
+    "sfx_vol": 7,
+    "difficulty": 1  # 0: Easy, 1: Normal, 2: Hard
+}
+difficulty_names = ["EASY", "NORMAL", "HARD"]
+# Spawn rate musuh berdasarkan kesulitan (ms)
+spawn_rates = [800, 400, 200] 
+
+# --- AUDIO SYNTHESIZER (PEMBUAT SUARA OTOMATIS) ---
+def generate_square_wave(freq, duration_ms, volume=0.5):
+    """Membuat gelombang suara kotak (retro style)"""
+    sample_rate = 44100
+    n_samples = int(sample_rate * (duration_ms / 1000.0))
+    period = int(sample_rate / freq)
+    half_period = period // 2
+    amplitude = int(32767 * volume)
+    
+    # Optimasi: Buat satu siklus gelombang lalu ulang
+    high = struct.pack('<h', amplitude)
+    low = struct.pack('<h', -amplitude)
+    cycle = (high * half_period) + (low * half_period)
+    
+    num_cycles = int(n_samples / period) + 1
+    audio_data = (cycle * num_cycles)[:n_samples * 2] # *2 karena 16-bit (2 bytes)
+    
+    return pygame.mixer.Sound(buffer=audio_data)
+
+def generate_music_loop():
+    """Membuat musik latar prosedural"""
+    sample_rate = 44100
+    bpm = 120
+    beat_ms = 60000 / bpm
+    step_ms = beat_ms / 4 # 16th note
+    
+    # Pola Bassline sederhana (Arpeggio)
+    # Nada: A2, C3, E3, A3
+    notes = [110, 130, 164, 220] 
+    
+    full_track_data = bytearray()
+    
+    # Buat loop 4 bar
+    for _ in range(16): # 16 step sequence
+        for note in notes:
+            # Buat nada pendek
+            period = int(sample_rate / note)
+            half_period = period // 2
+            amplitude = int(32767 * 0.1) # Volume rendah untuk musik
+            
+            high = struct.pack('<h', amplitude)
+            low = struct.pack('<h', -amplitude)
+            cycle = (high * half_period) + (low * half_period)
+            
+            duration_samples = int(sample_rate * (step_ms / 1000.0))
+            num_cycles = int(duration_samples / period)
+            
+            wave = cycle * num_cycles
+            full_track_data.extend(wave)
+            
+    return pygame.mixer.Sound(buffer=full_track_data)
+
+def generate_noise(duration_ms, volume=0.5):
+    """Membuat suara noise (untuk ledakan)"""
+    sample_rate = 44100
+    n_samples = int(sample_rate * (duration_ms / 1000.0))
+    audio_data = bytearray()
+    amplitude = int(32767 * volume)
+    
+    for _ in range(n_samples):
+        val = random.randint(-amplitude, amplitude)
+        audio_data.extend(struct.pack('<h', val))
+        
+    return pygame.mixer.Sound(buffer=audio_data)
+
+# --- LOAD SOUND EFFECTS (DENGAN FALLBACK SYNTH) ---
+def load_sound_smart(name, type_hint="sfx"):
+    try:
+        # Coba load file asli dulu
+        path = f"sounds/{name}"
+        if os.path.exists(path):
+            return pygame.mixer.Sound(path)
+        else:
+            raise Exception("File not found")
+    except:
+        # Jika gagal, buat suara sintetis
+        if type_hint == "shoot":
+            # Pew pew sound (high pitch short)
+            return generate_square_wave(880, 100, 0.3)
+        elif type_hint == "explosion":
+            # Low pitch rumble
+            return generate_noise(300, 0.4)
+        elif type_hint == "hit":
+            # Short beep
+            return generate_square_wave(440, 50, 0.4)
+        elif type_hint == "music":
+            return generate_music_loop()
+        else:
+            return pygame.mixer.Sound(buffer=bytes([0]*1000))
+
+# Inisialisasi Suara menggunakan Generator
+shoot_sound = load_sound_smart("shoot.wav", "shoot")
+explosion_sound = load_sound_smart("explosion.wav", "explosion")
+hit_sound = load_sound_smart("hit.wav", "hit")
+background_music = load_sound_smart("background.mp3", "music")
+
+# Fungsi update volume
+def update_volumes():
+    # Konversi 0-10 ke 0.0-1.0
+    mus_vol = settings["music_vol"] / 10.0
+    sfx_vol = settings["sfx_vol"] / 10.0
+    
+    background_music.set_volume(mus_vol * 0.5) 
+    shoot_sound.set_volume(sfx_vol * 0.3)
+    explosion_sound.set_volume(sfx_vol * 0.4)
+    hit_sound.set_volume(sfx_vol * 0.5)
+
+# Terapkan volume awal & play music
+update_volumes()
+background_music.play(-1)
+
+# --- BACKGROUND STARS ---
+class Star:
+    def __init__(self):
+        self.x = random.randint(0, SCREEN_WIDTH)
+        self.y = random.randint(0, SCREEN_HEIGHT)
+        self.speed = random.uniform(0.1, 0.5)
+        self.size = random.randint(1, 3)
+        self.color = random.choice(STAR_COLORS)
+        self.twinkle_speed = random.uniform(0.01, 0.05)
+        self.twinkle_offset = random.uniform(0, math.pi * 2)
+        self.brightness = random.uniform(0.5, 1.0)
+        
+    def update(self):
+        self.x -= self.speed * 2
+        if self.x < -10:
+            self.x = SCREEN_WIDTH + 10
+            self.y = random.randint(0, SCREEN_HEIGHT)
+            
+    def draw(self, surface):
+        twinkle = (math.sin(pygame.time.get_ticks() * self.twinkle_speed + self.twinkle_offset) + 1) / 2
+        brightness = self.brightness * (0.7 + 0.3 * twinkle)
+        color = tuple(int(c * brightness) for c in self.color)
+        pygame.draw.circle(surface, color, (int(self.x), int(self.y)), self.size)
+
+# --- PARTICLE SYSTEM ---
+class Particle:
+    def __init__(self, x, y, color=None):
+        self.x = x
+        self.y = y
+        self.color = color or random.choice([RED, ORANGE, YELLOW])
+        self.size = random.randint(2, 5)
+        self.speed_x = random.uniform(-3, 3)
+        self.speed_y = random.uniform(-3, 3)
+        self.life = random.randint(20, 40)
+        self.max_life = self.life
+        
+    def update(self):
+        self.x += self.speed_x
+        self.y += self.speed_y
+        self.speed_x *= 0.95
+        self.speed_y *= 0.95
+        self.life -= 1
+        self.size = max(1, self.size * 0.95)
+        return self.life > 0
+        
+    def draw(self, surface):
+        if self.life > 0:
+            alpha = int(255 * (self.life / self.max_life))
+            particle_surf = pygame.Surface((int(self.size*2), int(self.size*2)), pygame.SRCALPHA)
+            pygame.draw.circle(particle_surf, (*self.color[:3], alpha), 
+                             (int(self.size), int(self.size)), int(self.size))
+            surface.blit(particle_surf, (int(self.x) - self.size, int(self.y) - self.size))
+
+# --- KELAS UTAMA ---
+
+class Player(pygame.sprite.Sprite):
+    def __init__(self):
+        super(Player, self).__init__()
+        self.image = pygame.Surface((80, 50), pygame.SRCALPHA)
+        
+        # Gambar pesawat
+        pygame.draw.polygon(self.image, BLUE, [(0, 25), (70, 15), (70, 35), (0, 25)])
+        pygame.draw.polygon(self.image, (100, 150, 255), [(0, 20), (30, 20), (0, 10)])
+        pygame.draw.polygon(self.image, (100, 150, 255), [(0, 30), (30, 30), (0, 40)])
+        
+        # Kokpit
+        pygame.draw.circle(self.image, CYAN, (55, 25), 8)
+        pygame.draw.circle(self.image, (200, 230, 255), (55, 25), 5)
+        
+        # Engine glow
+        for i in range(3):
+            radius = 12 - i*4
+            alpha = 100 - i*30
+            glow_surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+            pygame.draw.circle(glow_surf, (*ORANGE[:3], alpha), (radius, radius), radius)
+            self.image.blit(glow_surf, (0, 25 - radius))
+        
+        self.original_image = self.image.copy()
+        self.rect = self.image.get_rect()
+        self.rect.left = 50
+        self.rect.centery = SCREEN_HEIGHT // 2
+        
+        # --- ATRIBUT KECEPATAN ---
+        self.normal_speed = 9
+        self.boost_speed = 18
+        self.current_speed = self.normal_speed
+        
+        self.max_health = 100
+        self.current_health = 100
+        self.last_shot = pygame.time.get_ticks()
+        self.shoot_delay = 200
+        self.shield_active = False
+        self.shield_timer = 0
+        
+    def update(self, pressed_keys):
+        # --- LOGIKA BOOST (SHIFT) ---
+        if pressed_keys[pygame.K_LSHIFT] or pressed_keys[pygame.K_RSHIFT]:
+            self.current_speed = self.boost_speed
+            if random.random() < 0.5:
+                p = Particle(self.rect.left, self.rect.centery + random.randint(-5, 5), (50, 200, 255))
+                p.speed_x = -5
+                particles.append(p)
+        else:
+            self.current_speed = self.normal_speed
+
+        # Gerakan
+        move_x, move_y = 0, 0
+        if pressed_keys[pygame.K_UP]: move_y = -self.current_speed
+        if pressed_keys[pygame.K_DOWN]: move_y = self.current_speed
+        if pressed_keys[pygame.K_LEFT]: move_x = -self.current_speed
+        if pressed_keys[pygame.K_RIGHT]: move_x = self.current_speed
+            
+        self.rect.move_ip(move_x, move_y)
+        
+        # Efek miring
+        if move_x != 0:
+            tilt = -move_x * 1.5
+            self.image = pygame.transform.rotate(self.original_image, tilt)
+            self.rect = self.image.get_rect(center=self.rect.center)
+        else:
+            self.image = self.original_image.copy()
+        
+        # Shield logic
+        if self.shield_active:
+            self.shield_timer -= 1
+            if self.shield_timer <= 0:
+                self.shield_active = False
+            else:
+                shield_surf = pygame.Surface((self.rect.width+20, self.rect.height+20), pygame.SRCALPHA)
+                pygame.draw.circle(shield_surf, (*CYAN[:3], 100), 
+                                 (shield_surf.get_width()//2, shield_surf.get_height()//2), 
+                                 shield_surf.get_width()//2, 3)
+                screen.blit(shield_surf, (self.rect.x-10, self.rect.y-10))
+        
+        self.rect.clamp_ip(screen.get_rect())
+
+    def shoot(self):
+        now = pygame.time.get_ticks()
+        if now - self.last_shot > self.shoot_delay:
+            if self.current_health > 70:
+                bullet1 = Bullet(self.rect.right, self.rect.centery - 10, True)
+                bullet2 = Bullet(self.rect.right, self.rect.centery + 10, True)
+                all_sprites.add(bullet1, bullet2)
+                bullets.add(bullet1, bullet2)
+            else:
+                bullet = Bullet(self.rect.right, self.rect.centery, False)
+                all_sprites.add(bullet)
+                bullets.add(bullet)
+            
+            shoot_sound.play()
+            self.last_shot = now
+            self.rect.x -= 3
+
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x, y, is_powerful):
+        super(Bullet, self).__init__()
+        width = 25 if is_powerful else 20
+        height = 8 if is_powerful else 6
+        self.image = pygame.Surface((width, height), pygame.SRCALPHA)
+        
+        if is_powerful:
+            colors = [(255, 100, 0), (255, 200, 0), (255, 255, 100)]
+            for i, color in enumerate(colors):
+                pygame.draw.rect(self.image, color, (i*8, 0, 8, height))
+        else:
+            colors = [(0, 200, 255), (100, 220, 255)]
+            pygame.draw.rect(self.image, colors[0], (0, 0, 15, height))
+            pygame.draw.rect(self.image, colors[1], (15, 0, 5, height))
+        
+        self.rect = self.image.get_rect()
+        self.rect.center = (x, y)
+        self.speed = 18 if is_powerful else 15
+        
+    def update(self):
+        self.rect.x += self.speed
+        if self.rect.left > SCREEN_WIDTH:
+            self.kill()
+
+class Enemy(pygame.sprite.Sprite):
+    def __init__(self):
+        super(Enemy, self).__init__()
+        size = random.choice([(40, 30), (60, 40), (50, 35)])
+        self.image = pygame.Surface(size, pygame.SRCALPHA)
+        
+        enemy_color = random.choice([RED, PURPLE, ORANGE])
+        highlight_color = tuple(min(c + 50, 255) for c in enemy_color)
+        
+        if size[0] == 60:
+            pygame.draw.polygon(self.image, enemy_color, [(60, 15), (0, 0), (15, 20), (0, 40), (60, 25)])
+            pygame.draw.circle(self.image, YELLOW, (20, 20), 8)
+            self.health = 2
+        else:
+            pygame.draw.polygon(self.image, enemy_color, [(size[0], size[1]//3), (0, 0), (size[0]//4, size[1]//2), (0, size[1]), (size[0], size[1]*2//3)])
+            pygame.draw.circle(self.image, ORANGE, (size[0]//4, size[1]//2), 4)
+            self.health = 1
+        
+        pygame.draw.polygon(self.image, highlight_color, [(size[0], size[1]//3), (size[0]//2, size[1]//4), (size[0]//2, size[1]*3//4)], 2)
+        
+        self.original_image = self.image.copy()
+        self.rect = self.image.get_rect()
+        self.rect.x = SCREEN_WIDTH + random.randint(20, 100)
+        self.rect.y = random.randint(30, SCREEN_HEIGHT - 30)
+        self.speed = random.randint(4, 9)
+        self.oscillation = random.uniform(0, math.pi * 2)
+        self.oscillation_speed = random.uniform(0.02, 0.05)
+        self.hit_flash = 0
+        
+    def update(self):
+        self.oscillation += self.oscillation_speed
+        self.rect.move_ip(-self.speed, math.sin(self.oscillation) * 2)
+        
+        if self.hit_flash > 0:
+            self.hit_flash -= 1
+            flash_overlay = pygame.Surface(self.image.get_size(), pygame.SRCALPHA)
+            flash_overlay.fill((255, 255, 255, 100))
+            self.image.blit(flash_overlay, (0, 0))
+        
+        if self.rect.right < 0:
+            self.kill()
+
+class Explosion(pygame.sprite.Sprite):
+    def __init__(self, center, size="medium"):
+        super(Explosion, self).__init__()
+        self.size = size
+        self.radius = 5
+        self.max_radius = 40 if size == "large" else 30 if size == "medium" else 20
+        self.image = pygame.Surface((self.max_radius*2, self.max_radius*2), pygame.SRCALPHA)
+        self.rect = self.image.get_rect(center=center)
+        self.timer = 0
+        
+    def update(self):
+        self.timer += 1
+        self.radius += 4
+        
+        if self.timer % 2 == 0 and self.radius < self.max_radius:
+            for _ in range(3):
+                angle = random.uniform(0, math.pi * 2)
+                distance = random.uniform(0, self.radius)
+                px = self.rect.centerx + math.cos(angle) * distance
+                py = self.rect.centery + math.sin(angle) * distance
+                particles.append(Particle(px, py))
+        
+        self.image.fill((0, 0, 0, 0))
+        if self.radius < self.max_radius:
+            pygame.draw.circle(self.image, ORANGE, (self.max_radius, self.max_radius), min(self.radius, self.max_radius))
+            pygame.draw.circle(self.image, YELLOW, (self.max_radius, self.max_radius), min(max(1, self.radius - 8), self.max_radius))
+            pygame.draw.circle(self.image, WHITE, (self.max_radius, self.max_radius), min(max(1, self.radius - 15), self.max_radius))
+        
+        if self.timer > 15:
+            self.kill()
+
+class Cloud(pygame.sprite.Sprite):
+    def __init__(self):
+        super(Cloud, self).__init__()
+        width = random.randint(80, 200)
+        height = random.randint(40, 80)
+        self.image = pygame.Surface((width, height), pygame.SRCALPHA)
+        for _ in range(8):
+            x = random.randint(0, width - 60)
+            y = random.randint(0, height - 40)
+            radius = random.randint(20, 40)
+            alpha = random.randint(30, 60)
+            color = random.choice([(100, 100, 255), (255, 100, 255), (100, 255, 255)])
+            pygame.draw.circle(self.image, (*color, alpha), (x + 30, y + 20), radius)
+        self.rect = self.image.get_rect()
+        self.rect.x = SCREEN_WIDTH + random.randint(10, 100)
+        self.rect.y = random.randint(0, SCREEN_HEIGHT - 100)
+        self.speed = random.randint(1, 3)
+        
+    def update(self):
+        self.rect.x -= self.speed
+        if self.rect.right < 0:
+            self.kill()
+
+# --- FUNGSI UI & HELPER ---
+def draw_health_bar(surface, health, x, y, width=300, height=30):
+    pygame.draw.rect(surface, (50, 50, 50), (x, y, width, height), border_radius=5)
+    ratio = max(health / 100, 0)
+    fill_width = int(width * ratio)
+    color = (50, 255, 100) if ratio > 0.6 else (255, 200, 50) if ratio > 0.3 else (255, 50, 50)
+    pygame.draw.rect(surface, color, (x, y, fill_width, height), border_radius=5)
+    pygame.draw.rect(surface, WHITE, (x, y, width, height), 3, border_radius=5)
+    health_text = font_text.render(f"{health}/100", True, WHITE)
+    surface.blit(health_text, (x + width + 10, y))
+
+def draw_text_center(text, font, color, surface, y_offset=0, outline=False):
+    if outline:
+        for dx, dy in [(-2, -2), (2, -2), (-2, 2), (2, 2)]:
+            textobj_outline = font.render(text, 1, BLACK)
+            textrect_outline = textobj_outline.get_rect(center=(SCREEN_WIDTH // 2 + dx, SCREEN_HEIGHT // 2 + y_offset + dy))
+            surface.blit(textobj_outline, textrect_outline)
+    textobj = font.render(text, 1, color)
+    textrect = textobj.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + y_offset))
+    surface.blit(textobj, textrect)
+
+def reset_game():
+    global stars
+    all_sprites.empty()
+    enemies.empty()
+    bullets.empty()
+    clouds.empty()
+    explosions.empty()
+    particles.clear()
+    stars = [Star() for _ in range(200)]
+    new_player = Player()
+    all_sprites.add(new_player)
+    
+    # Reset timer spawn musuh berdasarkan kesulitan
+    current_spawn_rate = spawn_rates[settings["difficulty"]]
+    pygame.time.set_timer(ADDENEMY, current_spawn_rate)
+    
+    return new_player
+
+# --- SETUP GRUP SPRITE ---
+player = None
+all_sprites = pygame.sprite.Group()
+enemies = pygame.sprite.Group()
+bullets = pygame.sprite.Group()
+clouds = pygame.sprite.Group()
+explosions = pygame.sprite.Group()
+particles = []
+
+stars = [Star() for _ in range(200)]
+
+# Event Timers
+ADDENEMY = pygame.USEREVENT + 1
+pygame.time.set_timer(ADDENEMY, 400) # Default normal
+ADDCLOUD = pygame.USEREVENT + 2
+pygame.time.set_timer(ADDCLOUD, 1000)
+
+# --- NAVIGASI MENU ---
+menu_options = ["MUSIC VOL", "SFX VOL", "DIFFICULTY", "BACK"]
+selected_option = 0
+
+def draw_settings_menu():
+    overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 200))
+    screen.blit(overlay, (0, 0))
+    
+    draw_text_center("PENGATURAN", font_title, CYAN, screen, -200, True)
+    
+    start_y = -50
+    gap = 70
+    
+    for i, option in enumerate(menu_options):
+        color = YELLOW if i == selected_option else GREY
+        text_str = option
+        value_str = ""
+        
+        # Logika tampilan nilai
+        if option == "MUSIC VOL":
+            vol = settings["music_vol"]
+            # Visual bar: [|||||.....]
+            bar = "|" * vol + "." * (10 - vol)
+            value_str = f"[{bar}] {vol}"
+        elif option == "SFX VOL":
+            vol = settings["sfx_vol"]
+            bar = "|" * vol + "." * (10 - vol)
+            value_str = f"[{bar}] {vol}"
+        elif option == "DIFFICULTY":
+            value_str = f"<{difficulty_names[settings['difficulty']]}>"
+        
+        # Render text
+        opt_surf = font_menu.render(text_str, True, color)
+        opt_rect = opt_surf.get_rect(topleft=(SCREEN_WIDTH//2 - 200, SCREEN_HEIGHT//2 + start_y + i * gap))
+        screen.blit(opt_surf, opt_rect)
+        
+        if value_str:
+            val_surf = font_menu.render(value_str, True, WHITE)
+            val_rect = val_surf.get_rect(topleft=(SCREEN_WIDTH//2 + 50, SCREEN_HEIGHT//2 + start_y + i * gap))
+            screen.blit(val_surf, val_rect)
+
+    # Instruksi
+    inst_surf = font_text.render("Gunakan ARAH untuk ubah, ENTER untuk pilih", True, (150, 150, 150))
+    screen.blit(inst_surf, (SCREEN_WIDTH//2 - inst_surf.get_width()//2, SCREEN_HEIGHT - 100))
+
+# --- GAME LOOP ---
+running = True
+game_state = "MENU"
+score = 0
+combo = 0
+last_kill_time = 0
+
+while running:
+    # 1. EVENT HANDLING
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        
+        # --- MENU UTAMA ---
+        if game_state == "MENU":
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    player = reset_game()
+                    score = 0
+                    combo = 0
+                    game_state = "PLAYING"
+                elif event.key == pygame.K_s: # S untuk Settings
+                    game_state = "SETTINGS"
+                    selected_option = 0
+                elif event.key == pygame.K_ESCAPE:
+                    running = False
+        
+        # --- PENGATURAN ---
+        elif game_state == "SETTINGS":
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_UP:
+                    selected_option = (selected_option - 1) % len(menu_options)
+                elif event.key == pygame.K_DOWN:
+                    selected_option = (selected_option + 1) % len(menu_options)
+                
+                # Ubah Nilai
+                if event.key == pygame.K_LEFT or event.key == pygame.K_RIGHT:
+                    change = 1 if event.key == pygame.K_RIGHT else -1
+                    option_name = menu_options[selected_option]
+                    
+                    if option_name == "MUSIC VOL":
+                        settings["music_vol"] = max(0, min(10, settings["music_vol"] + change))
+                        update_volumes()
+                    elif option_name == "SFX VOL":
+                        settings["sfx_vol"] = max(0, min(10, settings["sfx_vol"] + change))
+                        update_volumes()
+                    elif option_name == "DIFFICULTY":
+                        settings["difficulty"] = (settings["difficulty"] + change) % 3
+                
+                # Kembali ke Menu
+                if event.key == pygame.K_RETURN or event.key == pygame.K_SPACE or event.key == pygame.K_ESCAPE:
+                    if menu_options[selected_option] == "BACK" or event.key == pygame.K_ESCAPE:
+                        game_state = "MENU"
+
+        # --- PLAYING ---
+        elif game_state == "PLAYING":
+            if event.type == ADDENEMY:
+                new_enemy = Enemy()
+                enemies.add(new_enemy)
+                all_sprites.add(new_enemy)
+            elif event.type == ADDCLOUD:
+                new_cloud = Cloud()
+                clouds.add(new_cloud)
+                all_sprites.add(new_cloud)
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    player.shoot()
+                elif event.key == pygame.K_ESCAPE: # Pause/Back to menu
+                    game_state = "MENU"
+
+        # --- GAME OVER ---
+        elif game_state == "GAMEOVER":
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_r:
+                    player = reset_game()
+                    score = 0
+                    combo = 0
+                    game_state = "PLAYING"
+                elif event.key == pygame.K_q or event.key == pygame.K_ESCAPE:
+                    game_state = "MENU"
+
+    # 2. UPDATE LOGIC
+    for star in stars:
+        star.update()
+    
+    particles = [p for p in particles if p.update()]
+
+    if game_state == "PLAYING":
+        pressed_keys = pygame.key.get_pressed()
+        player.update(pressed_keys)
+        enemies.update()
+        bullets.update()
+        clouds.update()
+        explosions.update()
+
+        # Collisions
+        hits = pygame.sprite.groupcollide(enemies, bullets, False, True)
+        for enemy in hits:
+            enemy.health -= 1
+            enemy.hit_flash = 5
+            hit_sound.play()
+            for _ in range(5): particles.append(Particle(enemy.rect.centerx, enemy.rect.centery, RED))
+            
+            if enemy.health <= 0:
+                enemy.kill()
+                score += 20 * (settings["difficulty"] + 1) # Skor lebih tinggi jika hard
+                combo += 1
+                last_kill_time = pygame.time.get_ticks()
+                if combo >= 3: score += combo * 10
+                expl = Explosion(enemy.rect.center, "large" if enemy.health > 1 else "medium")
+                all_sprites.add(expl)
+                explosion_sound.play()
+
+        if pygame.time.get_ticks() - last_kill_time > 2000: combo = 0
+
+        hits = pygame.sprite.spritecollide(player, enemies, True)
+        for hit in hits:
+            player.current_health -= 15 * (settings["difficulty"] + 1) # Damage lebih sakit jika hard
+            expl = Explosion(hit.rect.center, "medium")
+            all_sprites.add(expl)
+            explosion_sound.play()
+            
+            if player.current_health <= 30 and not player.shield_active:
+                player.shield_active = True
+                player.shield_timer = 180
+            
+            if player.current_health <= 0:
+                death_expl = Explosion(player.rect.center, "large")
+                all_sprites.add(death_expl)
+                explosion_sound.play()
+                player.kill()
+                game_state = "GAMEOVER"
+
+    # 3. DRAWING
+    for y in range(SCREEN_HEIGHT):
+        color = (int(25 + y * 0.02), int(25 + y * 0.01), int(50 + y * 0.05))
+        pygame.draw.line(screen, color, (0, y), (SCREEN_WIDTH, y))
+    
+    for star in stars: star.draw(screen)
+    for cloud in clouds: screen.blit(cloud.image, cloud.rect)
+    for particle in particles: particle.draw(screen)
+
+    if game_state == "MENU":
+        draw_text_center("GALACTIC DEFENSE", font_title, BLUE, screen, -100, True)
+        draw_text_center("TEKAN SPASI UNTUK MULAI", font_text, YELLOW, screen, 0)
+        draw_text_center("TEKAN 'S' UNTUK PENGATURAN", font_text, CYAN, screen, 50)
+        draw_text_center("SHIFT: Turbo | SPASI: Tembak", font_text, WHITE, screen, 120)
+        
+    elif game_state == "SETTINGS":
+        draw_settings_menu()
+        
+    elif game_state == "PLAYING":
+        for entity in all_sprites:
+            if not isinstance(entity, Cloud):
+                screen.blit(entity.image, entity.rect)
+        
+        draw_health_bar(screen, player.current_health, 20, 20)
+        score_text = font_text.render(f"SCORE: {score}", True, YELLOW)
+        screen.blit(score_text, (SCREEN_WIDTH - 200, 25))
+        
+        diff_text = font_text.render(f"MODE: {difficulty_names[settings['difficulty']]}", True, WHITE)
+        screen.blit(diff_text, (20, 60))
+        
+        if combo >= 2:
+            combo_text = font_text.render(f"COMBO x{combo}!", True, CYAN)
+            screen.blit(combo_text, (SCREEN_WIDTH - 200, 60))
+
+    elif game_state == "GAMEOVER":
+        for entity in all_sprites:
+            if not isinstance(entity, Cloud):
+                screen.blit(entity.image, entity.rect)
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 150))
+        screen.blit(overlay, (0, 0))
+        draw_text_center("GAME OVER", font_title, RED, screen, -50, True)
+        draw_text_center(f"FINAL SCORE: {score}", font_text, YELLOW, screen, 20)
+        draw_text_center("Tekan R untuk Restart", font_text, WHITE, screen, 70)
+        draw_text_center("Tekan Q untuk Menu", font_text, GREY, screen, 110)
+
+    pygame.display.flip()
+    clock.tick(FPS)
+
+pygame.quit()
